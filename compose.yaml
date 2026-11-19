@@ -1,0 +1,90 @@
+name: fleetcore
+
+x-app: &app
+  image: fleetcore-local
+  build: .
+  init: true
+
+services:
+  db:
+    image: postgres:17.12-bookworm
+    environment:
+      POSTGRES_USER: fleetcore
+      POSTGRES_PASSWORD: local-db-demo
+      POSTGRES_DB: fleetcore
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fleetcore -d fleetcore"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  broker:
+    image: eclipse-mosquitto:2.0.22
+    entrypoint: ["/bin/sh", "/fleetcore/broker.sh"]
+    volumes:
+      - ./deploy/broker.sh:/fleetcore/broker.sh:ro
+      - ./deploy/mosquitto.conf:/fleetcore/mosquitto.conf:ro
+      - ./deploy/mosquitto.acl:/fleetcore/mosquitto.acl:ro
+    ports:
+      - "127.0.0.1:${MQTT_PUBLISHED_PORT:-1883}:1883"
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-u", "fleetcore-service", "-P", "service-broker-demo", "-t", "fleetcore/health", "-n"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app
+    environment:
+      DATABASE_URL: postgres://fleetcore:local-db-demo@db/fleetcore
+      MQTT_HOST: broker
+      MQTT_PASSWORD: service-broker-demo
+      SEED_DEMO: "true"
+      INGEST_MODE: ${INGEST_MODE:-unnest}
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./deploy/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+
+  simulator:
+    <<: *app
+    profiles: ["tools"]
+    entrypoint: ["simulator"]
+    environment:
+      SERVICE_URL: http://api:8080
+      MQTT_HOST: broker
+      OUTBOX_URL: sqlite:///state/outbox.sqlite
+    volumes:
+      - outbox:/state
+
+  acceptance:
+    <<: *app
+    profiles: ["tools"]
+    entrypoint: ["acceptance"]
+    environment:
+      INGEST_MODE: ${INGEST_MODE:-unnest}
+      SERVICE_URL: http://api:8080
+      MQTT_HOST: broker
+      DATABASE_URL: postgres://fleetcore:local-db-demo@db/fleetcore
+
+volumes:
+  database:
+  outbox:

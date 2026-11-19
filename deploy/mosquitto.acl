@@ -1,0 +1,12 @@
+user fleetcore-service
+topic read devices/+/telemetry
+topic write devices/+/receipts
+topic write fleetcore/health
+
+user north-van
+topic write devices/north-van/telemetry
+topic read devices/north-van/receipts
+
+user south-van
+topic write devices/south-van/telemetry
+topic read devices/south-van/receipts
