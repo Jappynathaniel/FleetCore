@@ -80,7 +80,10 @@ async fn ingest_http(State(app): State<App>, headers: HeaderMap, body: Bytes) ->
     };
     let auth_started = Instant::now();
     let device = app.store.by_token(token).await;
-    app.ingestion.metrics.stage.with_label_values(&["http", "authentication"])
+    app.ingestion
+        .metrics
+        .stage
+        .with_label_values(&["http", "authentication"])
         .observe(auth_started.elapsed().as_secs_f64());
     let device = match device {
         Ok(Some(device)) => device,
@@ -274,7 +277,10 @@ pub async fn run_mqtt(
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 let subscriber = client.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = subscriber.subscribe("devices/+/telemetry", QoS::AtLeastOnce).await {
+                    if let Err(error) = subscriber
+                        .subscribe("devices/+/telemetry", QoS::AtLeastOnce)
+                        .await
+                    {
                         tracing::warn!(%error, "could not queue MQTT subscription");
                     }
                 });

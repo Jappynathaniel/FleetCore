@@ -99,8 +99,10 @@ impl MqttSender {
     }
 
     pub async fn send(&mut self, batch: &Batch) -> anyhow::Result<Delivery> {
-        let timeout =
-            tokio::time::timeout(Duration::from_secs(5), async { self.ready.wait_for(|ready| *ready).await.map(|_| ()) }).await;
+        let timeout = tokio::time::timeout(Duration::from_secs(5), async {
+            self.ready.wait_for(|ready| *ready).await.map(|_| ())
+        })
+        .await;
         match timeout {
             Ok(ready) => {
                 ready.context("MQTT publisher stopped")?;

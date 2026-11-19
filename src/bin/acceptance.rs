@@ -12,7 +12,7 @@ use fleetcore::{
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use reqwest::{Client, Response, StatusCode};
-use rumqttc::{AsyncClient, Event, Packet, QoS};
+use rumqttc::{AsyncClient, QoS};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -225,7 +225,10 @@ async fn main() -> anyhow::Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    ensure!(harness.accept(&lost_receipt).await?.duplicates == 1, "lost receipt replay duplicated data");
+    ensure!(
+        harness.accept(&lost_receipt).await?.duplicates == 1,
+        "lost receipt replay duplicated data"
+    );
     ensure!(
         count(&database, denied.events[0].event_id).await? == 0,
         "broker allowed cross-device publishing"
