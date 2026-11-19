@@ -30,7 +30,7 @@ services:
     ports:
       - "127.0.0.1:${MQTT_PUBLISHED_PORT:-1883}:1883"
     healthcheck:
-      test: ["CMD", "mosquitto_pub", "-u", "fleetcore-service", "-P", "service-broker-demo", "-t", "fleetcore/health", "-n"]
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-i", "fleetcore-health", "-u", "fleetcore-service", "-P", "service-broker-demo", "-t", "fleetcore/health", "-n"]
       interval: 2s
       timeout: 3s
       retries: 30
