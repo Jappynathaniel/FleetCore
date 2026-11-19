@@ -4,7 +4,7 @@ FleetCore is a Rust backend for connected-vehicle telemetry. Vehicles can buffer
 
 ## Run the demo
 
-Use Docker with Compose v2. Run these commands from the repository root:
+Use Docker with Compose v2 and BuildKit. Run these commands from the repository root:
 
 ```sh
 docker compose up -d --build --wait api prometheus
@@ -42,6 +42,8 @@ Run `docker compose down` to stop the demo and keep its volumes.
 
 Run `docker compose -f compose.bench.yaml up -d --build --wait api-copy`, then `docker compose -f compose.bench.yaml run -T --rm benchmark`. On a POSIX shell, `sh scripts/benchmark.sh` runs both commands. Add `--scenario reconnect --layer http` to focus on 1,000 devices replaying 360,000 events. The runner emits one JSON record per trial, including confirmation latency, backlog drain time, throughput, WAL volume, and retries. It resets only its dedicated benchmark database.
 
-Prepared UNNEST is the service default. Set `INGEST_MODE=copy` for the opt-in binary COPY comparison. COPY stages rows in a connection-local table before the same transactional merge, deduplication and confirmation logic. The focused transport benchmark uses HTTP. Acceptance covers HTTP and MQTT.
+In the 360,000-event HTTP reconnect workload, prepared UNNEST drained the backlog in a median of **9.77 s**, compared with **10.31 s** for staged binary COPY over five measured trials on local PostgreSQL 17.12. The median of trial-average queue waits was **297 ms** with UNNEST and **312 ms** with COPY. Prepared UNNEST remains the default.
+
+In the one-million-event HTTP stress case with 10,000 events per batch, staged COPY reduced the median drain time from **16.87 s** to **13.86 s** (**17.8%**). Set `INGEST_MODE=copy` for the opt-in binary COPY comparison. COPY stages rows in a connection-local table before the same transactional merge, deduplication and confirmation logic. The focused transport benchmark uses HTTP. Acceptance covers HTTP and MQTT.
 
 Stop the benchmark stack with `docker compose -f compose.bench.yaml down`.
