@@ -58,3 +58,5 @@ Run `sh scripts/bounded_replay.sh` for the bounded replay recipe, or `sh scripts
 The runner reports both first-attempt and scheduled-arrival confirmation latency. Scheduled latency includes waiting for a sender slot. `sh scripts/sustained.sh` runs a 30-minute mixed-read soak with growing history, while `sh scripts/mqtt_study.sh` exercises distinct device connections and a forced PostgreSQL restart. These scripts use the disposable benchmark stack.
 
 The 30-minute repeated-window soak verified **165,000 events** and **16,497 reads**, with zero read errors and an effective wall-time rate of **91.36 events/s**. The MQTT tests held **1,000 distinct connections for 30 seconds** and verified all **3,600 expected events** after repeated PostgreSQL process kills. These results cover the stated local resource budget and workload.
+
+The eight-batch queue candidate increased retries and tail latency in an exploratory comparison and was rejected. A separate reconnect stress run targeting 100 serial reads/s achieved 65-67/s and recorded one read error; higher-rate mixed reads need further validation.
