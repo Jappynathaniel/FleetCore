@@ -2,3 +2,4 @@
 /.env
 *.sqlite*
 /runs/
+__pycache__/

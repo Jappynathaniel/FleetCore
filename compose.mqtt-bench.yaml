@@ -1,0 +1,32 @@
+services:
+  benchmark-broker:
+    image: eclipse-mosquitto:2.0.22
+    cpus: 1
+    mem_limit: 256m
+    entrypoint: ["/bin/sh", "/tools/benchmark-broker.sh"]
+    volumes:
+      - ./deploy/benchmark-broker.sh:/tools/benchmark-broker.sh:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-i", "probe-health", "-u", "bench-0000", "-P", "bench-0000-sample", "-t", "devices/bench-0000/telemetry", "-n"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+  api-unnest:
+    environment:
+      MQTT_HOST: benchmark-broker
+      MQTT_PASSWORD: service-broker-demo
+    depends_on:
+      benchmark-broker:
+        condition: service_healthy
+  mqtt-probe:
+    image: python:3.12.10-slim-bookworm
+    cpus: 2
+    mem_limit: 512m
+    entrypoint: ["python", "/tools/mqtt_connections.py"]
+    volumes:
+      - ./scripts/mqtt_connections.py:/tools/mqtt_connections.py:ro
+    environment:
+      MQTT_ATTEMPTS: ${MQTT_ATTEMPTS:-20}
+      MQTT_JITTER: ${MQTT_JITTER:-1}
+      MQTT_CLIENTS: ${MQTT_CLIENTS:-100}
+      MQTT_HOLD_SECONDS: ${MQTT_HOLD_SECONDS:-30}
