@@ -11,10 +11,13 @@ use uuid::Uuid;
 
 use crate::protocol::Event;
 
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+mod binary;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum WriteMode {
     #[default]
     Unnest,
+    Copy,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -54,7 +57,7 @@ impl Store {
         let pool = PgPoolOptions::new()
             .max_connections(connections)
             .acquire_timeout(Duration::from_secs(3))
-            .after_connect(|connection, _| {
+            .after_connect(move |connection, _| {
                 Box::pin(async move {
                     sqlx::query("SET statement_timeout = '10s'")
                         .execute(&mut *connection)
@@ -62,6 +65,11 @@ impl Store {
                     sqlx::query("SET lock_timeout = '5s'")
                         .execute(&mut *connection)
                         .await?;
+                    if mode == WriteMode::Copy {
+                        sqlx::query(binary::CREATE_STAGE)
+                            .execute(&mut *connection)
+                            .await?;
+                    }
                     Ok(())
                 })
             })
@@ -169,6 +177,7 @@ impl Store {
             .await?;
         let (inserted, matched) = match self.mode {
             WriteMode::Unnest => write_unnest(&mut tx, device, events).await?,
+            WriteMode::Copy => binary::write(&mut tx, device, events).await?,
         };
         if matched != events.len() as i64 {
             tx.rollback().await?;

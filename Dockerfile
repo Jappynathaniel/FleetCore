@@ -6,7 +6,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --locked --release --bins -j 4 && mkdir /out && cp target/release/fleetcore target/release/simulator target/release/acceptance /out/
+    cargo build --locked --release --bins -j 4 && mkdir /out && cp target/release/fleetcore target/release/simulator target/release/acceptance target/release/benchmark /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \

@@ -37,3 +37,11 @@ COMPOSE_PROJECT_NAME=fleetcore-check HTTP_PORT=18080 MQTT_PUBLISHED_PORT=11883 s
 The bounded queue rejects excess work and feeds a fixed worker pool backed by PostgreSQL. Database commits precede application receipts. The history index supplies both latest state and chronological reads. These guarantees are shared across transports.
 
 Run `docker compose down` to stop the demo and keep its volumes.
+
+## Benchmark ingestion
+
+Run `docker compose -f compose.bench.yaml up -d --build --wait api-copy`, then `docker compose -f compose.bench.yaml run -T --rm benchmark`. On a POSIX shell, `sh scripts/benchmark.sh` runs both commands. Add `--scenario reconnect --layer http` to focus on 1,000 devices replaying 360,000 events. The runner emits one JSON record per trial, including confirmation latency, backlog drain time, throughput, WAL volume, and retries. It resets only its dedicated benchmark database.
+
+Prepared UNNEST is the service default. Set `INGEST_MODE=copy` for the opt-in binary COPY comparison. COPY stages rows in a connection-local table before the same transactional merge, deduplication and confirmation logic. The focused transport benchmark uses HTTP. Acceptance covers HTTP and MQTT.
+
+Stop the benchmark stack with `docker compose -f compose.bench.yaml down`.

@@ -1,0 +1,60 @@
+name: fleetcore-benchmark
+
+x-benchmark-app: &benchmark-app
+  image: fleetcore-local
+  build: .
+  init: true
+  cpus: 2
+  mem_limit: 768m
+
+x-benchmark-environment: &benchmark-environment
+  DATABASE_URL: postgres://fleetcore:benchmark-local@benchmark-db/fleetcore_benchmark
+
+x-benchmark-health: &benchmark-health
+  test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+
+services:
+  benchmark-db:
+    image: postgres:17.12-bookworm
+    cpus: 2
+    mem_limit: 1g
+    environment:
+      POSTGRES_USER: fleetcore
+      POSTGRES_PASSWORD: benchmark-local
+      POSTGRES_DB: fleetcore_benchmark
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fleetcore -d fleetcore_benchmark"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api-unnest:
+    <<: *benchmark-app
+    environment:
+      <<: *benchmark-environment
+      INGEST_MODE: unnest
+    depends_on:
+      benchmark-db:
+        condition: service_healthy
+    healthcheck: *benchmark-health
+
+  api-copy:
+    <<: *benchmark-app
+    environment:
+      <<: *benchmark-environment
+      INGEST_MODE: copy
+    depends_on:
+      api-unnest:
+        condition: service_healthy
+    healthcheck: *benchmark-health
+
+  benchmark:
+    <<: *benchmark-app
+    entrypoint: ["benchmark"]
+    environment:
+      BENCH_DATABASE_URL: postgres://fleetcore:benchmark-local@benchmark-db/fleetcore_benchmark
+      BENCH_UNNEST_URL: http://api-unnest:8080
+      BENCH_COPY_URL: http://api-copy:8080
