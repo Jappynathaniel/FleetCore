@@ -50,6 +50,10 @@ impl Drop for WorkPermits {
 }
 
 impl Admission {
+    pub fn enabled(&self) -> bool {
+        self.state.enabled
+    }
+
     pub fn new(enabled: bool, global: usize, tenant: usize, metrics: &Metrics) -> Self {
         Self {
             state: Arc::new(AdmissionState {

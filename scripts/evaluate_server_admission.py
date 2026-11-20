@@ -1,5 +1,6 @@
 """Fail closed on absent, failed, or mismatched experiment cells."""
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -7,19 +8,49 @@ from pathlib import Path
 root = Path(sys.argv[1])
 
 
+def require(condition, label):
+    if not condition:
+        raise SystemExit(f"Incomplete or mismatched experiment cell: {label}")
+
+
 def load(label, concurrency, events=360000, batches=1000, spread=0, cohort=None):
-    assert (root / f"{label}.status").read_text().strip() == "completed", label
+    require((root / f"{label}.status").read_text().strip() == "completed", label)
+    manifest = root / f"{label}.server.json"
+    if manifest.exists():
+        config = json.loads(manifest.read_text())[0]["Config"]
+        env = dict(value.split("=", 1) for value in config["Env"] if "=" in value)
+        enabled = label.startswith(("candidate-", "holdout-candidate-", "quiet-", "noisy-"))
+        require(env.get("TENANT_ADMISSION") == str(enabled).lower()
+                and env.get("ADMISSION_GLOBAL") == "16"
+                and env.get("ADMISSION_PER_TENANT") == "8"
+                and env.get("INGEST_QUEUE") == "64", label)
     records = [json.loads(line) for line in (root / f"{label}.jsonl").read_text().splitlines() if line.strip()]
+    require(len(records) == 3, label)
     metadata = records[0]
-    assert metadata["arrival_spread_ms"] == spread, label
-    assert metadata["noisy_neighbor"] == (cohort == "noisy"), label
-    assert metadata["quiet_only"] == (cohort == "quiet"), label
+    require(metadata["arrival_spread_ms"] == spread, label)
+    require(metadata["noisy_neighbor"] == (cohort == "noisy"), label)
+    require(metadata["quiet_only"] == (cohort == "quiet"), label)
+    require(metadata["http_concurrency"] == concurrency and metadata["measured_trials"] == 1
+            and metadata["query_rate"] == 0 and metadata["sustain_seconds"] == 0
+            and metadata["synchronous_commit"] == "on"
+            and metadata["devices_override"] is None
+            and metadata["events_per_device_override"] == (240 if spread else None), label)
+    require(records[1]["warmup"] is True and records[1]["trial"] == 0, label)
     rows = [r for r in records[1:] if not r["warmup"]]
-    assert len(rows) == 1, label
+    require(len(rows) == 1, label)
     row = rows[0]
-    assert row["integrity_verified"] is True, label
-    assert (row["events"], row["batches"], row["concurrency"]) == (events, batches, concurrency), label
-    assert row["layer"] == "http" and row["scenario"] == "reconnect" and row["mode"] == "unnest", label
+    require(row["integrity_verified"] is True and row["trial"] == 1, label)
+    require((row["events"], row["batches"], row["concurrency"]) == (events, batches, concurrency), label)
+    require(row["layer"] == "http" and row["scenario"] == "reconnect" and row["mode"] == "unnest", label)
+    require(all(math.isfinite(row[key]) and row[key] >= 0 for key in
+                ("elapsed_seconds", "scheduled_p99_ms", "events_per_second", "retries"))
+            and row["elapsed_seconds"] > 0 and type(row["retries"]) is int, label)
+    tenants = {"benchmark-noisy": 1000, "benchmark-quiet": 100} if cohort == "noisy" else {"benchmark-quiet": 100} if cohort == "quiet" else {"benchmark": 1000}
+    require(set(row["tenant_results"]) == set(tenants), label)
+    for tenant, count in tenants.items():
+        result = row["tenant_results"][tenant]
+        require(result["batches"] == count and all(math.isfinite(result[key]) and result[key] >= 0
+                for key in ("scheduled_p99_ms", "completed_at_seconds")), label)
     return row
 
 

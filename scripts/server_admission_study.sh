@@ -4,12 +4,19 @@ set -eu
 output=${1:-runs/server-admission}
 mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd)
-export ADMISSION_GLOBAL=16 ADMISSION_PER_TENANT=8
+if [ -n "$(find "$output" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo 'Use a new, empty output directory to retain previous attempts.' >&2
+    exit 1
+fi
+export ADMISSION_GLOBAL=16 ADMISSION_PER_TENANT=8 INGEST_QUEUE=64
+git rev-parse HEAD > "$output/source-revision.txt"
 docker compose -f compose.bench.yaml build --build-arg BUILD_JOBS="${BUILD_JOBS:-2}" >&2
 run_cell() {
     label=$1; enabled=$2; concurrency=$3; shift 3
+    printf 'running\n' > "$output/$label.status"
     export TENANT_ADMISSION=$enabled
     docker compose -f compose.bench.yaml up -d --wait api-unnest >&2
+    docker inspect "$(docker compose -f compose.bench.yaml ps -q api-unnest)" > "$output/$label.server.json"
     if docker compose -f compose.bench.yaml run -T --rm benchmark \
         --scenario reconnect --layer http --mode unnest --trials 1 \
         --concurrency "$concurrency" "$@" > "$output/$label.jsonl" 2> "$output/$label.log"; then

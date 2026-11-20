@@ -147,7 +147,9 @@ impl Ingestion {
     }
 
     pub fn submit(&self, identity: Identity, body: &[u8], reply: Reply) {
-        if let Identity::Mqtt(id) = identity {
+        if self.admission.enabled()
+            && let Identity::Mqtt(id) = identity
+        {
             let Ok(permit) = self.lookups.clone().try_acquire_owned() else {
                 // No receipt is safe: the durable sender retries unconfirmed work.
                 self.metrics
