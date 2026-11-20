@@ -3,6 +3,7 @@ name = "fleetcore"
 version = "0.1.0"
 edition = "2024"
 default-run = "fleetcore"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0"

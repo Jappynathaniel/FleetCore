@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Format, Clippy and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: rust:1.95.0-bookworm
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install lint components
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Deny Clippy warnings across all targets
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run unit and documentation tests
+        run: cargo test --locked --all-targets --all-features && cargo test --locked --doc
+      - name: Check reproduction script syntax
+        run: |
+          for script in scripts/*.sh; do sh -n "$script"; done
+          python3 -m py_compile scripts/*.py
+
+  acceptance:
+    name: Acceptance (both writers and admission policies)
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build once and verify four disposable configurations
+        run: sh scripts/ci_acceptance.sh

@@ -1,5 +1,8 @@
 # FleetCore
 
+[![CI](https://github.com/Jappynathaniel/FleetCore/actions/workflows/ci.yml/badge.svg)](https://github.com/Jappynathaniel/FleetCore/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 FleetCore is a Rust backend for connected-vehicle telemetry. Vehicles can buffer data in a durable local outbox, send it over HTTP or MQTT, and replay it when connectivity returns. Operators can query current state and event history within their tenant.
 
 ## Run the demo
@@ -27,6 +30,17 @@ API and metrics are available on `localhost:8080` and Prometheus on `localhost:9
 - Retry HTTP 429 or 5xx and MQTT `busy` or `unavailable` with the original event IDs. An ID reused with a different event payload rejects the whole batch. HTTP uses 409 for this conflict.
 
 ## Verify behavior
+
+CI runs on pushes to `main` and pull requests. It checks formatting, denies Clippy warnings across every target, runs unit tests, and exercises the Compose acceptance suite under both SQL writers with tenant admission enabled and disabled. The acceptance suite includes PostgreSQL and MQTT broker outage/replay checks. Each job uses disposable data, bounded build concurrency, a timeout and read-only repository permissions.
+
+With Rust 1.95.0 and its `rustfmt` and `clippy` components installed, run the code checks locally:
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo test --locked --doc
+```
 
 Run `sh scripts/acceptance.sh` against a disposable Compose project. It exercises both transports, concurrent replay, rollback, cross-tenant access, queue saturation and outage recovery. Use a dedicated project name if retaining demo data:
 
@@ -96,3 +110,7 @@ Set `TENANT_ADMISSION=true` in Compose to explore the policy. `ADMISSION_GLOBAL`
 Run `sh scripts/server_admission_study.sh /absolute/path/to/empty-results-directory` for the controls, noisy-neighbor test and frozen holdout. It retains failures and refuses to overwrite prior evidence. Raw experiment files and the full engineering dossier are maintained outside this source repository.
 
 HTTP authentication-before-body and the three-second body-read deadline apply with either policy. Acceptance checks cover stalled/oversized bodies, permit lifetime, shared HTTP/MQTT limits and shutdown drain. The limit applies after HTTP headers have been parsed.
+
+## License
+
+FleetCore is available under the [MIT License](LICENSE).
