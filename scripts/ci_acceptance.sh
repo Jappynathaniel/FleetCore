@@ -15,6 +15,7 @@ for mode in unnest copy; do
         trap cleanup EXIT
         printf '\nAcceptance: writer=%s admission=%s\n' "$mode" "$admission"
         sh scripts/acceptance.sh
+        python3 scripts/crash_replay.py
         cleanup
         trap - EXIT
     done

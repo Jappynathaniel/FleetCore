@@ -31,7 +31,7 @@ API and metrics are available on `localhost:8080` and Prometheus on `localhost:9
 
 ## Verify behavior
 
-CI runs on pushes to `main` and pull requests. It checks formatting, denies Clippy warnings across every target, runs unit tests, and exercises the Compose acceptance suite under both SQL writers with tenant admission enabled and disabled. The acceptance suite includes PostgreSQL and MQTT broker outage/replay checks. Each job uses disposable data, bounded build concurrency, a timeout and read-only repository permissions.
+CI runs on pushes to `main` and pull requests. It checks formatting, denies Clippy warnings across every target, runs unit tests, and exercises the Compose acceptance suite under both SQL writers with tenant admission enabled and disabled. Alongside the outage checks, a test-only PostgreSQL trigger pauses an in-flight insert before commit. The harness observes the pause, kills PostgreSQL, verifies rollback, then replays the saved batch twice and reconciles every stored field. Each job uses disposable data, bounded build concurrency, a timeout and read-only repository permissions.
 
 With Rust 1.95.0 and its `rustfmt` and `clippy` components installed, run the code checks locally:
 
