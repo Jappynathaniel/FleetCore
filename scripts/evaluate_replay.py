@@ -10,12 +10,30 @@ prefix = sys.argv[2] if len(sys.argv) > 2 else "concurrency"
 trials = int(sys.argv[3]) if len(sys.argv) > 3 else 10
 baseline, candidate = [], []
 for trial in range(1, trials + 1):
+    paired_metadata = []
     for concurrency, output in ((96, baseline), (16, candidate)):
         rows = [json.loads(line) for line in (root / f"{prefix}-{concurrency}-{trial}.jsonl").read_text().splitlines()]
         valid = [row for row in rows if row.get("mode") and not row["warmup"]]
         if len(valid) != 1 or not valid[0]["integrity_verified"]:
             raise SystemExit("Incomplete or invalid trial")
-        output.append(valid[0])
+        row, metadata = valid[0], rows[0]
+        paired_metadata.append(metadata)
+        devices = metadata.get("devices_override") or 1000
+        per_device = metadata.get("events_per_device_override") or 360
+        if (row.get("concurrency") != concurrency
+                or metadata.get("http_concurrency") != concurrency
+                or row.get("layer") != "http" or row.get("scenario") != "reconnect"
+                or row.get("mode") != "unnest"
+                or row.get("batches") != devices
+                or row.get("events") != devices * per_device):
+            raise SystemExit("Mismatched workload or concurrency metadata")
+        output.append(row)
+    if any(baseline[-1][key] != candidate[-1][key] for key in ("events", "batches", "scenario", "layer", "mode")):
+        raise SystemExit("Paired workloads differ")
+    if any(paired_metadata[0].get(key) != paired_metadata[1].get(key) for key in
+           ("arrival_spread_ms", "query_rate", "sustain_seconds", "event_seed",
+            "devices_override", "events_per_device_override", "noisy_neighbor", "quiet_only")):
+        raise SystemExit("Paired arrival schedules or workload settings differ")
 
 rng = random.Random(20261119)
 def median(rows, key):

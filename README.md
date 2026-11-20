@@ -21,7 +21,7 @@ API and metrics are available on `localhost:8080` and Prometheus on `localhost:9
 
 ## Interfaces
 
-- `POST /v1/telemetry/batches` accepts a JSON object with `batch_id` and `events`. Event fields are `event_id`, `observed_at_ms`, `latitude_e6`, `longitude_e6`, and `speed_cm_s`. IDs are UUIDs. Event limits are 1â€“10,000 and the payload limit is 2 MiB.
+- `POST /v1/telemetry/batches` accepts a JSON object with `batch_id` and `events`. Event fields are `event_id`, `observed_at_ms`, `latitude_e6`, `longitude_e6`, and `speed_cm_s`. IDs are UUIDs. Event limits are 1 to 10,000 and the payload limit is 2 MiB.
 - MQTT publishes the same JSON to `devices/{device_id}/telemetry` at QoS 1. Wait for a `committed` receipt on `devices/{device_id}/receipts` before dropping the outbox entry. Receipts carry the batch ID, outcome, inserted count, and duplicate count for distinct IDs.
 - `GET /v1/vehicles/{device_id}/latest` returns the most recent observation, or HTTP 204 for an empty history. `GET /v1/vehicles/{device_id}/telemetry?limit=100` returns events and an optional `next_cursor`. Pass that cursor back as `cursor` to continue. Ordering is descending by observation time and event ID.
 - Retry HTTP 429 or 5xx and MQTT `busy` or `unavailable` with the original event IDs. An ID reused with a different event payload rejects the whole batch. HTTP uses 409 for this conflict.

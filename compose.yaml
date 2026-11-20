@@ -43,6 +43,9 @@ services:
       MQTT_PASSWORD: service-broker-demo
       SEED_DEMO: "true"
       INGEST_MODE: ${INGEST_MODE:-unnest}
+      TENANT_ADMISSION: ${TENANT_ADMISSION:-false}
+      ADMISSION_GLOBAL: ${ADMISSION_GLOBAL:-16}
+      ADMISSION_PER_TENANT: ${ADMISSION_PER_TENANT:-8}
     depends_on:
       db:
         condition: service_healthy

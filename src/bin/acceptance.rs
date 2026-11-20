@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail, ensure};
 use clap::Parser;
 use fleetcore::{
+    admission::Admission,
     client::{Delivery, MqttSender},
     metrics::Metrics,
     protocol::{Batch, Event as TelemetryEvent, Outcome, Receipt},
@@ -237,6 +238,8 @@ async fn main() -> anyhow::Result<()> {
 
     check_queue(&harness, &database).await?;
     check_drain(&harness, &database).await?;
+    check_admission_lease(&harness, &database).await?;
+    check_body_deadline(&harness).await?;
     sqlx::query("DELETE FROM tenants WHERE id = $1")
         .bind(run.to_string())
         .execute(&database)
@@ -329,6 +332,96 @@ async fn check_drain(harness: &Harness, database: &PgPool) -> anyhow::Result<()>
         count(database, second.events[0].event_id).await? == 1,
         "queued batch missing after drain"
     );
+    Ok(())
+}
+
+async fn check_admission_lease(harness: &Harness, database: &PgPool) -> anyhow::Result<()> {
+    let store = Store::open(&harness.config.database, harness.config.mode, 2).await?;
+    let device = store.by_id(NORTH_DEVICE).await?.context("missing device")?;
+    let metrics = Metrics::new()?;
+    let admission = Admission::new(true, 1, 1, &metrics);
+    let lease = admission.try_acquire(&device.tenant_id).unwrap();
+    let mut lock = database.begin().await?;
+    sqlx::query("SELECT id FROM devices WHERE id = 'north-van' FOR NO KEY UPDATE")
+        .fetch_one(&mut *lock)
+        .await?;
+    let (ingest, dispatcher) =
+        Ingestion::start_with_admission(store, metrics.clone(), 3, 2, admission.clone());
+    let first = batch(vec![event(14_000)]);
+    let (reply, receiver) = tokio::sync::oneshot::channel();
+    ingest.submit_with_lease(
+        Identity::Http(device),
+        &serde_json::to_vec(&first)?,
+        Reply::Http(reply),
+        lease,
+    );
+    drop(receiver);
+    ensure!(
+        admission.try_acquire("another-tenant").is_err(),
+        "disconnect released work budget"
+    );
+    let (reply, receiver) = tokio::sync::oneshot::channel();
+    ingest.submit(
+        Identity::Mqtt("south-van".into()),
+        &serde_json::to_vec(&batch(vec![event(15_000)]))?,
+        Reply::Http(reply),
+    );
+    ensure!(
+        tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await??
+            .outcome
+            == Outcome::Busy,
+        "MQTT bypassed shared work budget"
+    );
+    ingest.stopping.cancel();
+    lock.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(5), dispatcher).await??;
+    ensure!(
+        count(database, first.events[0].event_id).await? == 1,
+        "disconnected write missing"
+    );
+    ensure!(
+        metrics.admitted.get() == 0,
+        "work permit leaked after drain"
+    );
+    Ok(())
+}
+
+async fn check_body_deadline(harness: &Harness) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let url = reqwest::Url::parse(&harness.config.http)?;
+    for (token, expected) in [("invalid", "401"), (NORTH, "408")] {
+        let mut socket = tokio::net::TcpStream::connect((
+            url.host_str().context("missing host")?,
+            url.port_or_known_default().context("missing port")?,
+        ))
+        .await?;
+        let request = format!(
+            "POST /v1/telemetry/batches HTTP/1.1\r\nHost: fleetcore\r\nAuthorization: Bearer {token}\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{{"
+        );
+        socket.write_all(request.as_bytes()).await?;
+        let mut response = [0_u8; 1024];
+        let timeout = if token == "invalid" { 2 } else { 5 };
+        let length = tokio::time::timeout(Duration::from_secs(timeout), socket.read(&mut response))
+            .await??;
+        let response = std::str::from_utf8(&response[..length])?;
+        ensure!(
+            response.starts_with(&format!("HTTP/1.1 {expected}")),
+            "unexpected partial-body response {response}"
+        );
+    }
+    let response = harness
+        .http
+        .post(format!("{}/v1/telemetry/batches", harness.config.http))
+        .bearer_auth(NORTH)
+        .body(vec![b' '; fleetcore::protocol::MAX_BODY + 1])
+        .send()
+        .await?;
+    ensure!(
+        response.status() == StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized body accepted"
+    );
+    harness.accept(&batch(vec![event(16_000)])).await?;
     Ok(())
 }
 

@@ -9,6 +9,9 @@ x-benchmark-app: &benchmark-app
 
 x-benchmark-environment: &benchmark-environment
   INGEST_QUEUE: ${INGEST_QUEUE:-64}
+  TENANT_ADMISSION: ${TENANT_ADMISSION:-false}
+  ADMISSION_GLOBAL: ${ADMISSION_GLOBAL:-16}
+  ADMISSION_PER_TENANT: ${ADMISSION_PER_TENANT:-8}
   DATABASE_URL: postgres://fleetcore:benchmark-local@benchmark-db/fleetcore_benchmark
 
 x-benchmark-health: &benchmark-health

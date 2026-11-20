@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, ensure};
 use clap::Parser;
 use fleetcore::{
+    admission::Admission,
     metrics::Metrics,
     service::{App, Ingestion},
     store::{Store, WriteMode},
@@ -39,6 +40,14 @@ struct Config {
     mqtt_password: Option<String>,
     #[arg(long, env = "SEED_DEMO", default_value_t = false)]
     seed_demo: bool,
+    #[arg(long, env = "TENANT_ADMISSION", default_value_t = false)]
+    tenant_admission: bool,
+    #[arg(long, env = "ADMISSION_GLOBAL", default_value_t = 16)]
+    admission_global: usize,
+    #[arg(long, env = "ADMISSION_PER_TENANT", default_value_t = 8)]
+    admission_per_tenant: usize,
+    #[arg(long, env = "BODY_TIMEOUT_SECONDS", default_value_t = 3)]
+    body_timeout_seconds: u64,
 }
 
 #[tokio::main]
@@ -57,14 +66,33 @@ async fn main() -> anyhow::Result<()> {
         config.connections as usize > config.workers,
         "reserve database connections for reads and identity"
     );
+    ensure!(
+        config.admission_global > 0
+            && config.admission_per_tenant > 0
+            && config.admission_per_tenant <= config.admission_global
+            && config.body_timeout_seconds > 0,
+        "invalid admission or body timeout configuration"
+    );
     let store = Store::open(&config.database_url, config.mode, config.connections).await?;
     if config.seed_demo {
         store.seed_demo().await?;
     }
 
     let listener = TcpListener::bind(config.listen).await?;
-    let (ingestion, mut dispatcher) =
-        Ingestion::start(store.clone(), Metrics::new()?, config.queue, config.workers);
+    let metrics = Metrics::new()?;
+    let admission = Admission::new(
+        config.tenant_admission,
+        config.admission_global,
+        config.admission_per_tenant,
+        &metrics,
+    );
+    let (ingestion, mut dispatcher) = Ingestion::start_with_admission(
+        store.clone(),
+        metrics,
+        config.queue,
+        config.workers,
+        admission,
+    );
     let mqtt_stop = CancellationToken::new();
     let mqtt_ready = Arc::new(AtomicBool::new(config.mqtt_host.is_none()));
     let mqtt_task = if let Some(host) = config.mqtt_host {
@@ -95,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         ingestion: ingestion.clone(),
         http_admission: Arc::new(Semaphore::new(config.workers + config.queue)),
         mqtt_ready,
+        body_timeout: Duration::from_secs(config.body_timeout_seconds),
     };
     let stop = ingestion.stopping.clone();
     let mut http = tokio::spawn(async move {

@@ -3,15 +3,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -22,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    admission::{AdmissionContext, TenantAdmissionLayer, bearer, retry_response as retry},
     protocol::{Event as TelemetryEvent, MAX_BODY, Outcome},
     service::{App, Identity, Ingestion, Reply},
     store::Device,
@@ -31,7 +31,14 @@ pub fn router(app: App) -> Router {
     let ingest = Router::new()
         .route("/v1/telemetry/batches", post(ingest_http))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .route_layer(middleware::from_fn_with_state(app.clone(), limit_http));
+        .route_layer(TenantAdmissionLayer {
+            store: app.store.clone(),
+            admission: app.ingestion.admission.clone(),
+            requests: app.http_admission.clone(),
+            stopping: app.ingestion.stopping.clone(),
+            metrics: app.ingestion.metrics.clone(),
+            body_timeout: app.body_timeout,
+        });
     Router::new()
         .merge(ingest)
         .route("/v1/vehicles/{device}/latest", get(latest))
@@ -42,57 +49,19 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-async fn limit_http(State(app): State<App>, request: Request, next: Next) -> Response {
-    if app.ingestion.stopping.is_cancelled() {
-        return retry(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let Ok(_permit) = app.http_admission.try_acquire() else {
-        app.ingestion
-            .metrics
-            .outcomes
-            .with_label_values(&["http", "busy"])
-            .inc();
-        return retry(StatusCode::TOO_MANY_REQUESTS);
-    };
-    next.run(request).await
-}
-
-fn retry(status: StatusCode) -> Response {
-    (status, [(header::RETRY_AFTER, "1")]).into_response()
-}
-
-fn bearer(headers: &HeaderMap) -> Result<&str, StatusCode> {
-    let (scheme, token) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() || token.len() > 256 {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(token)
-}
-
-async fn ingest_http(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(status) => return status.into_response(),
-    };
-    let auth_started = Instant::now();
-    let device = app.store.by_token(token).await;
-    app.ingestion
-        .metrics
-        .stage
-        .with_label_values(&["http", "authentication"])
-        .observe(auth_started.elapsed().as_secs_f64());
-    let device = match device {
-        Ok(Some(device)) => device,
-        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
-        Err(error) => return query_error(error).into_response(),
-    };
+async fn ingest_http(
+    State(app): State<App>,
+    Extension(device): Extension<Device>,
+    Extension(context): Extension<AdmissionContext>,
+    body: Bytes,
+) -> Response {
     let (send, receive) = oneshot::channel();
-    app.ingestion
-        .submit(Identity::Http(device), &body, Reply::Http(send));
+    app.ingestion.submit_with_lease(
+        Identity::Http(device),
+        &body,
+        Reply::Http(send),
+        context.lease,
+    );
     let receipt = match tokio::time::timeout(Duration::from_secs(30), receive).await {
         Ok(Ok(receipt)) => receipt,
         _ => return retry(StatusCode::SERVICE_UNAVAILABLE),

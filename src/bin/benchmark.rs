@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, bail, ensure};
 use clap::{Parser, ValueEnum};
 use fleetcore::{
-    client::{Delivery, retry_delay, send_http},
+    client::{Delivery, retry_delay_after, send_http},
     protocol::{Batch, Event},
     store::{Device, Store, WriteMode},
 };
@@ -70,6 +70,10 @@ struct Config {
     events_per_device: Option<usize>,
     #[arg(long, default_value_t = 0)]
     arrival_spread_ms: u64,
+    #[arg(long, conflicts_with = "quiet_only")]
+    noisy_neighbor: bool,
+    #[arg(long, conflicts_with = "noisy_neighbor")]
+    quiet_only: bool,
 }
 
 struct Input {
@@ -86,6 +90,8 @@ struct Sample {
     database: Duration,
     commit: Duration,
     retries: usize,
+    tenant: String,
+    completed_at: Duration,
 }
 
 type Stage = BTreeMap<String, StageValue>;
@@ -118,14 +124,22 @@ struct ResultRow<'a> {
     integrity_verified: bool,
     concurrency: usize,
     mean_stage_ms: BTreeMap<String, f64>,
+    tenant_results: BTreeMap<String, TenantResult>,
+}
+
+#[derive(Serialize)]
+struct TenantResult {
+    batches: usize,
+    scheduled_p99_ms: f64,
+    completed_at_seconds: f64,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     ensure!(
-        (1..=1024).contains(&config.concurrency),
-        "concurrency must be 1–1024"
+        (1..=4096).contains(&config.concurrency),
+        "concurrency must be 1–4096"
     );
     if config.sustain_seconds > 0 {
         ensure!(
@@ -166,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         "live_rate_per_second": 100, "event_seed": "fleetcore-v1",
         "devices_override": config.devices, "events_per_device_override": config.events_per_device,
         "arrival_spread_ms": config.arrival_spread_ms, "query_rate": config.query_rate,
-        "sustain_seconds": config.sustain_seconds})
+        "sustain_seconds": config.sustain_seconds, "noisy_neighbor": config.noisy_neighbor, "quiet_only": config.quiet_only})
     );
 
     let unnest = Store::open(&config.database, WriteMode::Unnest, 12).await?;
@@ -246,21 +260,44 @@ async fn main() -> anyhow::Result<()> {
 
 async fn prepare(db: &PgPool, scenario: Scenario, config: &Config) -> anyhow::Result<Vec<Input>> {
     let (default_devices, default_batch) = scenario.dimensions();
-    let devices = config.devices.unwrap_or(default_devices);
+    let devices = if config.noisy_neighbor {
+        1100
+    } else if config.quiet_only {
+        100
+    } else {
+        config.devices.unwrap_or(default_devices)
+    };
     let per_batch = config.events_per_device.unwrap_or(default_batch);
     ensure!(
         (1..=10000).contains(&devices) && (1..=10000).contains(&per_batch),
         "invalid workload dimensions"
     );
     let mut tx = db.begin().await?;
-    sqlx::query("INSERT INTO tenants VALUES ('benchmark', sha256(convert_to('benchmark-only', 'UTF8'))) ON CONFLICT DO NOTHING")
-        .execute(&mut *tx).await?;
+    for (tenant, token) in [
+        ("benchmark", "benchmark-only"),
+        ("benchmark-noisy", "noisy-operator"),
+        ("benchmark-quiet", "quiet-operator"),
+    ] {
+        sqlx::query("INSERT INTO tenants VALUES ($1, sha256(convert_to($2, 'UTF8'))) ON CONFLICT DO NOTHING")
+            .bind(tenant).bind(token).execute(&mut *tx).await?;
+    }
     let mut inputs = Vec::with_capacity(devices);
     for device_index in 0..devices {
-        let id = format!("bench-{device_index:04}");
+        let (tenant, id) = if config.quiet_only {
+            ("benchmark-quiet", format!("quiet-{device_index:04}"))
+        } else if config.noisy_neighbor && device_index >= 1000 {
+            (
+                "benchmark-quiet",
+                format!("quiet-{:04}", device_index - 1000),
+            )
+        } else if config.noisy_neighbor {
+            ("benchmark-noisy", format!("noisy-{device_index:04}"))
+        } else {
+            ("benchmark", format!("bench-{device_index:04}"))
+        };
         let token = format!("{id}-sample");
-        sqlx::query("INSERT INTO devices VALUES ($1, 'benchmark', sha256(convert_to($2, 'UTF8'))) ON CONFLICT DO NOTHING")
-            .bind(&id).bind(&token).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO devices VALUES ($1, $2, sha256(convert_to($3, 'UTF8'))) ON CONFLICT DO NOTHING")
+            .bind(&id).bind(tenant).bind(&token).execute(&mut *tx).await?;
         let mut batch = Batch {
             batch_id: Uuid::new_v4(),
             events: (0..per_batch)
@@ -288,7 +325,7 @@ async fn prepare(db: &PgPool, scenario: Scenario, config: &Config) -> anyhow::Re
         inputs.push(Input {
             device: Device {
                 id,
-                tenant_id: "benchmark".into(),
+                tenant_id: tenant.into(),
             },
             token,
             batch,
@@ -410,6 +447,8 @@ async fn run<'a>(
                         database: write.database_time,
                         commit: write.commit_time,
                         retries: 0,
+                        tenant: input.device.tenant_id.clone(),
+                        completed_at: start.elapsed(),
                     })
                 })
                 .buffer_unordered(8)
@@ -424,6 +463,7 @@ async fn run<'a>(
                     let began = Instant::now();
                     let mut error = String::new();
                     for attempt in 0..12 {
+                        let mut minimum = Duration::ZERO;
                         match send_http(http, url, &input.token, &input.batch).await {
                             Ok(Delivery::Acknowledged(receipt)) => {
                                 ensure!(
@@ -435,17 +475,19 @@ async fn run<'a>(
                                     scheduled_elapsed: (start + input.offset).elapsed(),
                                     elapsed: began.elapsed(),
                                     retries: attempt,
+                                    tenant: input.device.tenant_id.clone(),
+                                    completed_at: start.elapsed(),
                                     ..Sample::default()
                                 });
                             }
-                            Ok(Delivery::Retry) => {}
+                            Ok(Delivery::Retry(delay)) => minimum = delay,
                             Ok(Delivery::Rejected(reason)) => {
                                 bail!("benchmark batch rejected: {reason}")
                             }
                             Err(err) => error = err.to_string(),
                         }
                         if attempt < 11 {
-                            tokio::time::sleep(retry_delay(attempt)).await;
+                            tokio::time::sleep(retry_delay_after(attempt, minimum)).await;
                         }
                     }
                     bail!("batch {} exhausted retries: {error}", input.batch.batch_id)
@@ -548,6 +590,36 @@ async fn run<'a>(
             ])
         }
     };
+    let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
+    for sample in &samples {
+        groups
+            .entry(sample.tenant.clone())
+            .or_default()
+            .push(sample);
+    }
+    let tenant_results = groups
+        .into_iter()
+        .map(|(tenant, values)| {
+            let mut durations: Vec<_> = values
+                .iter()
+                .map(|sample| sample.scheduled_elapsed.as_secs_f64() * 1000.0)
+                .collect();
+            durations.sort_unstable_by(f64::total_cmp);
+            let completed = values
+                .iter()
+                .map(|sample| sample.completed_at)
+                .max()
+                .unwrap();
+            (
+                tenant,
+                TenantResult {
+                    batches: values.len(),
+                    scheduled_p99_ms: percentile(&durations, 0.99),
+                    completed_at_seconds: completed.as_secs_f64(),
+                },
+            )
+        })
+        .collect();
     Ok(ResultRow {
         layer,
         scenario,
@@ -569,6 +641,7 @@ async fn run<'a>(
         integrity_verified: true,
         concurrency: config.concurrency,
         mean_stage_ms,
+        tenant_results,
     })
 }
 

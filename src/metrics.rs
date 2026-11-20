@@ -5,6 +5,8 @@ use prometheus::{
 #[derive(Clone)]
 pub struct Metrics {
     registry: Registry,
+    pub admitted: IntGauge,
+    pub rejections: IntCounterVec,
     pub queue_depth: IntGauge,
     pub outcomes: IntCounterVec,
     pub stage: HistogramVec,
@@ -13,6 +15,19 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> anyhow::Result<Self> {
         let registry = Registry::new();
+        let admitted = IntGauge::new(
+            "fleetcore_admitted_work",
+            "Work holding a shared admission permit",
+        )?;
+        let rejections = IntCounterVec::new(
+            Opts::new(
+                "fleetcore_admission_rejections_total",
+                "Admission rejections",
+            ),
+            &["transport", "reason"],
+        )?;
+        registry.register(Box::new(admitted.clone()))?;
+        registry.register(Box::new(rejections.clone()))?;
         let queue_depth = IntGauge::new("fleetcore_queue_depth", "Batches awaiting a worker")?;
         let outcomes = IntCounterVec::new(
             Opts::new(
@@ -35,6 +50,8 @@ impl Metrics {
         registry.register(Box::new(stage.clone()))?;
         Ok(Self {
             registry,
+            admitted,
+            rejections,
             queue_depth,
             outcomes,
             stage,

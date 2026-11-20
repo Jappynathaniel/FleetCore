@@ -11,7 +11,7 @@ use crate::protocol::{Batch, Outcome, Receipt};
 
 pub enum Delivery {
     Acknowledged(Receipt),
-    Retry,
+    Retry(Duration),
     Rejected(String),
 }
 
@@ -28,15 +28,15 @@ pub async fn send_http(
         .send()
         .await?;
     let status = response.status();
-    if status.as_u16() == 429 || status.is_server_error() {
-        return Ok(Delivery::Retry);
+    if status.as_u16() == 429 || status.as_u16() == 408 || status.is_server_error() {
+        return Ok(Delivery::Retry(server_retry_delay(response.headers())));
     }
     if !status.is_success() {
         return Ok(Delivery::Rejected(format!("HTTP {status}")));
     }
     let receipt = response.json::<Receipt>().await?;
     if receipt.batch_id != batch.batch_id || receipt.outcome != Outcome::Committed {
-        return Ok(Delivery::Retry);
+        return Ok(Delivery::Retry(Duration::ZERO));
     }
     Ok(Delivery::Acknowledged(receipt))
 }
@@ -107,12 +107,12 @@ impl MqttSender {
             Ok(ready) => {
                 ready.context("MQTT publisher stopped")?;
             }
-            Err(_) => return Ok(Delivery::Retry),
+            Err(_) => return Ok(Delivery::Retry(Duration::ZERO)),
         }
         let result = tokio::time::timeout(Duration::from_secs(30), self.send_and_wait(batch)).await;
         match result {
             Ok(result) => result,
-            Err(_) => Ok(Delivery::Retry),
+            Err(_) => Ok(Delivery::Retry(Duration::ZERO)),
         }
     }
 
@@ -136,7 +136,7 @@ impl MqttSender {
             }
             return Ok(match receipt.outcome {
                 Outcome::Committed => Delivery::Acknowledged(receipt),
-                Outcome::Busy | Outcome::Unavailable => Delivery::Retry,
+                Outcome::Busy | Outcome::Unavailable => Delivery::Retry(Duration::ZERO),
                 outcome => Delivery::Rejected(format!("{outcome:?}")),
             });
         }
@@ -152,4 +152,49 @@ impl Drop for MqttSender {
 pub fn retry_delay(attempt: usize) -> Duration {
     let cap = 200_u64 * (1 << attempt.min(5));
     Duration::from_millis(rand::random_range(cap / 2..=cap))
+}
+
+fn server_retry_delay(headers: &reqwest::header::HeaderMap) -> Duration {
+    let Some(value) = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Duration::ZERO;
+    };
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Duration::from_secs(seconds);
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .and_then(|deadline| deadline.duration_since(std::time::SystemTime::now()).ok())
+        .unwrap_or_default()
+}
+
+pub fn retry_delay_after(attempt: usize, minimum: Duration) -> Duration {
+    minimum.saturating_add(retry_delay(attempt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertised_retry_minimum_is_preserved_with_jitter() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        let minimum = server_retry_delay(&headers);
+        for attempt in 0..12 {
+            let delay = retry_delay_after(attempt, minimum);
+            assert!(delay >= Duration::from_secs(2));
+            assert!(delay <= Duration::from_millis(8400));
+        }
+        headers.insert(reqwest::header::RETRY_AFTER, "bad".parse().unwrap());
+        assert_eq!(server_retry_delay(&headers), Duration::ZERO);
+        let deadline = std::time::SystemTime::now() + Duration::from_secs(10);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(deadline).parse().unwrap(),
+        );
+        assert!(server_retry_delay(&headers) >= Duration::from_secs(8));
+    }
 }

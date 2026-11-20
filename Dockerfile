@@ -1,4 +1,5 @@
 FROM rust:1.95.0-bookworm AS build
+ARG BUILD_JOBS=2
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
@@ -6,7 +7,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --locked --release --bins -j 4 && mkdir /out && cp target/release/fleetcore target/release/simulator target/release/acceptance target/release/benchmark /out/
+    cargo build --locked --release --bins -j "$BUILD_JOBS" && mkdir /out && cp target/release/fleetcore target/release/simulator target/release/acceptance target/release/benchmark /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \

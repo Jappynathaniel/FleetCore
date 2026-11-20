@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use fleetcore::{
-    client::{Delivery, MqttSender, retry_delay, send_http},
+    client::{Delivery, MqttSender, retry_delay_after, send_http},
     protocol::{Batch, Event, MAX_BODY, MAX_EVENTS},
     transport::mqtt_options,
 };
@@ -234,6 +234,7 @@ async fn flush(
         let batch: Batch = serde_json::from_str(&payload).context("decode persisted batch")?;
         let mut completed = false;
         for attempt in 0..attempts {
+            let mut minimum = Duration::ZERO;
             match transport.send(config, &batch).await {
                 Ok(Delivery::Acknowledged(receipt)) => {
                     sqlx::query("DELETE FROM outbox WHERE batch_id = ?")
@@ -249,11 +250,11 @@ async fn flush(
                     completed = true;
                     break;
                 }
-                Ok(Delivery::Retry) => {}
+                Ok(Delivery::Retry(delay)) => minimum = delay,
                 Err(error) => tracing::warn!(%error, "delivery attempt failed"),
             }
             if attempt + 1 < attempts {
-                tokio::time::sleep(retry_delay(attempt)).await;
+                tokio::time::sleep(retry_delay_after(attempt, minimum)).await;
             }
         }
         ensure!(completed, "batch {id} remains queued after {attempts} attempts");
